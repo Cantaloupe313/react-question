@@ -1,4 +1,10 @@
-import { AxiosRequestConfig } from "axios";
+import axios, { AxiosRequestConfig, AxiosInstance, AxiosResponse } from "axios";
+import TokenManager from "../tokenManager";
+import DefaultErrorHandler from "../errorHandler";
+// 定义错误处理的接口
+interface ErrorHandler {
+  (error: any): void;
+}
 
 export type Response<T> =
   | {
@@ -56,7 +62,69 @@ export interface Request {
     args: RequestConfig<D, Q, U, P>
   ): Promise<Response<T>>;
 }
+// 默认的错误处理函数
+const defaultErrorHandler: ErrorHandler = (error) => {
+  // 假设toast实例
+  const Toast = { show: () => {} };
+  new DefaultErrorHandler(Toast).handle(error);
+  // 这里可以弹出 toast 或者其他 UI 框架的提示
+  console.error("Request failed:", error);
+};
 
+// 创建 axios 实例
+const instance: AxiosInstance = axios.create({
+  baseURL: "/api", // 根据实际情况修改
+});
+
+// 请求拦截器
+instance.interceptors.request.use(
+  (config: any) => {
+    // 处理 token 的逻辑
+    if (!config?.ignoreAuth) {
+      const token = TokenManager.getToken();
+      if (token) {
+        config.headers["Authorization"] = `Bearer ${token}`;
+      }
+    }
+    return config;
+  },
+  (error) => {
+    return Promise.reject(error);
+  }
+);
+
+// 响应拦截器
+instance.interceptors.response.use(
+  async (response) => {
+    // 处理 token 过期的情况
+    if (response.data.status === 401) {
+      try {
+        const newToken = await TokenManager.refreshToken();
+        if (newToken) {
+          response.config.headers["Authorization"] = `Bearer ${newToken}`;
+          return instance.request(response.config);
+        }
+      } catch (refreshError) {
+        TokenManager.removeToken();
+        // 路由重定向到登录页面
+        location.href = `${location.origin}/login`;
+        return Promise.reject(refreshError);
+      }
+    }
+    return response;
+  },
+  async (error) => {
+    // 处理响应错误
+    if (error.config.silentError) {
+      defaultErrorHandler(error);
+    }
+    if (error.config.throwError) {
+      return Promise.reject(error);
+    }
+
+    return Promise.resolve(error.response);
+  }
+);
 const request: Request = async <
   T = any,
   D extends object = any,
@@ -66,7 +134,14 @@ const request: Request = async <
 >(
   args: RequestConfig<D, Q, U, P>
 ) => {
-  return {} as T;
+  try {
+    const response: AxiosResponse<T> = await instance.request({
+      ...args,
+    });
+    return response.data;
+  } catch (error) {
+    throw error;
+  }
 };
 
 export default request;
